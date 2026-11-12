@@ -1,0 +1,58 @@
+name: Release
+
+# Basalt's plugin workflow pushes one commit and a bare version tag per release. This turns the tag
+# into the release BRAT and Obsidian install from: main.js, manifest.json and styles.css.
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish the tagged version once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PUBLISHED: ${{ runner.temp }}/published
+        run: |
+          version="$(jq -r .version manifest.json)"
+          if [ "$version" != "$TAG" ]; then
+            message="Tag $TAG doesn't match manifest.json version $version."
+            echo "::error::$message"; echo "$message" >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          if [ "$(jq -r --arg v "$version" 'has($v)' versions.json)" != "true" ]; then
+            message="versions.json has no entry for $version."
+            echo "::error::$message"; echo "$message" >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/release"
+          cp dist/main.js dist/styles.css manifest.json "$RUNNER_TEMP/release/"
+          draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
+          if [ "$draft" = "false" ]; then
+            gh release download "$TAG" --dir "$PUBLISHED" --pattern main.js --pattern manifest.json --pattern styles.css
+            for file in main.js manifest.json styles.css; do
+              if ! cmp -s "$RUNNER_TEMP/release/$file" "$PUBLISHED/$file"; then
+                message="$TAG is already published and its $file differs from this commit. Published versions never change: release a new version."
+                echo "::error::$message"; echo "$message" >> "$GITHUB_STEP_SUMMARY"; exit 1
+              fi
+            done
+            echo "$TAG is already published with these exact files." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$draft" = "true" ]; then
+            # An interrupted create leaves a draft that BRAT can't see: finish it with these files.
+            gh release upload "$TAG" --clobber "$RUNNER_TEMP"/release/*
+            gh release edit "$TAG" --draft=false --latest
+          else
+            gh release create "$TAG" --verify-tag --latest --title "$TAG" \
+              --notes "Signalbox Sync $TAG." "$RUNNER_TEMP"/release/*
+          fi
+          echo "Published $TAG." >> "$GITHUB_STEP_SUMMARY"
