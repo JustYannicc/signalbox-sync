@@ -5581,7 +5581,17 @@ async function revokeSession(http, session2) {
       session2.revocationEndpoint,
       form({ ...value, client_id: session2.clientId })
     );
-    if (reply.status !== 200) throw new RevocationRefused(reply.status);
+    if (reply.status !== 200 && !alreadyInvalid(reply)) throw new RevocationRefused(reply.status);
+  }
+}
+var tokenGone = /* @__PURE__ */ new Set(["token not found", "refresh token revoked", "Invalid access token"]);
+function alreadyInvalid(reply) {
+  if (reply.status !== 400) return false;
+  try {
+    const body = object(JSON.parse(reply.body));
+    return body.error === "invalid_request" && typeof body.error_description === "string" && tokenGone.has(body.error_description);
+  } catch {
+    return false;
   }
 }
 
