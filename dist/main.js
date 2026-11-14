@@ -1396,8 +1396,8 @@ var require_buffer = __commonJS({
       value = +value;
       offset = offset >>> 0;
       if (!noAssert) {
-        const limit = Math.pow(2, 8 * byteLength2 - 1);
-        checkInt(this, value, offset, byteLength2, limit - 1, -limit);
+        const limit2 = Math.pow(2, 8 * byteLength2 - 1);
+        checkInt(this, value, offset, byteLength2, limit2 - 1, -limit2);
       }
       let i = 0;
       let mul = 1;
@@ -1415,8 +1415,8 @@ var require_buffer = __commonJS({
       value = +value;
       offset = offset >>> 0;
       if (!noAssert) {
-        const limit = Math.pow(2, 8 * byteLength2 - 1);
-        checkInt(this, value, offset, byteLength2, limit - 1, -limit);
+        const limit2 = Math.pow(2, 8 * byteLength2 - 1);
+        checkInt(this, value, offset, byteLength2, limit2 - 1, -limit2);
       }
       let i = byteLength2 - 1;
       let mul = 1;
@@ -4405,8 +4405,8 @@ function endpoint(input, allowLoopback = false) {
     throw new Error("Use an HTTPS Signalbox connection link");
   return url;
 }
-function json(reply, limit = 64 * 1024) {
-  if (reply.body.length > limit) throw new Error("Server reply exceeds the device response limit");
+function json(reply, limit2 = 64 * 1024) {
+  if (reply.body.length > limit2) throw new Error("Server reply exceeds the device response limit");
   return JSON.parse(reply.body);
 }
 
@@ -5435,7 +5435,7 @@ function connectionUrl(input, allowLoopback = false) {
   const query = new URLSearchParams({ connection, elicitation_mode: "native" });
   return `${url.origin}/mcp?${query}`;
 }
-async function beginConnection(http, input, now = Date.now(), allowLoopback = false) {
+async function beginConnection(http, input, now = Date.now(), allowLoopback = false, report = {}) {
   const resource = connectionUrl(input, allowLoopback), url = new URL(resource);
   const discovery = object(
     json(
@@ -5468,7 +5468,7 @@ async function beginConnection(http, input, now = Date.now(), allowLoopback = fa
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      client_name: "Signalbox Obsidian Sync",
+      client_name: report.device ?? "Signalbox Obsidian Sync",
       token_endpoint_auth_method: "none",
       grant_types: [grant, "refresh_token"],
       response_types: [],
@@ -5488,7 +5488,10 @@ async function beginConnection(http, input, now = Date.now(), allowLoopback = fa
       resource,
       scope: "mcp offline_access",
       code_challenge: challenge,
-      code_challenge_method: "S256"
+      code_challenge_method: "S256",
+      // Optional fields: servers that predate them ignore them.
+      ...report.device === void 0 ? {} : { device_name: report.device },
+      ...report.vault === void 0 ? {} : { device_context: report.vault }
     })
   );
   if (reply.status !== 200) throw new Error("Signalbox could not start device authorization");
@@ -5559,6 +5562,13 @@ async function refreshSession(http, session2, now = Date.now()) {
     throw new Error("Device access was removed or expired. Reconnect in Signalbox.");
   return token(object(json(reply)), session2, now);
 }
+var RevocationRefused = class extends Error {
+  status;
+  constructor(status) {
+    super("Device access could not be revoked. Keep this device connected and try again.");
+    this.status = status;
+  }
+};
 async function revokeSession(http, session2) {
   if (!session2.revocationEndpoint)
     throw new Error("This server requires removing this device in Signalbox Connections.");
@@ -5571,10 +5581,7 @@ async function revokeSession(http, session2) {
       session2.revocationEndpoint,
       form({ ...value, client_id: session2.clientId })
     );
-    if (reply.status !== 200)
-      throw new Error(
-        "Device access could not be revoked. Keep this device connected and try again."
-      );
+    if (reply.status !== 200) throw new RevocationRefused(reply.status);
   }
 }
 
@@ -6973,6 +6980,7 @@ function connecting(input) {
     interval: number(value, "interval")
   };
 }
+var sameVaultApp = (a, b) => a.appId === b.appId && new URL(a.connection).origin === new URL(b.connection).origin;
 async function createController(input) {
   const { http, local, secrets, key, changed } = input;
   if (!/^[a-z0-9-]+$/u.test(key)) throw new Error("Invalid device secret storage key");
@@ -7038,6 +7046,42 @@ async function createController(input) {
       progress: changed
     });
   };
+  const replacedKey = key + "-replaced";
+  const replacedSessions = () => {
+    try {
+      const value = JSON.parse(secrets.get(replacedKey) || "[]");
+      return (Array.isArray(value) ? value : [value]).flatMap((entry) => {
+        try {
+          return [session(entry)];
+        } catch {
+          return [];
+        }
+      });
+    } catch {
+      return [];
+    }
+  };
+  const saveReplaced = (sessions) => secrets.set(replacedKey, sessions.length === 0 ? "" : JSON.stringify(sessions));
+  const retire = async (old) => {
+    if (!old.revocationEndpoint) return true;
+    try {
+      await revokeSession(http, old);
+      return true;
+    } catch (failure) {
+      return failure instanceof RevocationRefused && failure.status >= 400 && failure.status < 500 && failure.status !== 408 && failure.status !== 429;
+    }
+  };
+  let retiring = Promise.resolve();
+  const retireReplaced = () => {
+    retiring = retiring.then(async () => {
+      const done = /* @__PURE__ */ new Set();
+      for (const old of replacedSessions()) if (await retire(old)) done.add(old.accessToken);
+      saveReplaced(replacedSessions().filter((old) => !done.has(old.accessToken)));
+    }).catch(() => {
+    });
+    return retiring;
+  };
+  void retireReplaced();
   await open();
   const status = () => {
     const base = client?.status() ?? {
@@ -7092,7 +7136,13 @@ async function createController(input) {
       await active?.catch(() => {
       });
       try {
-        const request = await beginConnection(http, selected.connection);
+        const request = await beginConnection(
+          http,
+          selected.connection,
+          void 0,
+          void 0,
+          input.report?.()
+        );
         pending = { config: selected, request, previousPaused };
         secrets.set(key + "-pending", JSON.stringify(pending));
         changed();
@@ -7120,10 +7170,15 @@ async function createController(input) {
         return false;
       }
       await remote?.close();
+      const replaced = current;
       current = { config: pending.config, session: result.session, paused: false };
       retain();
       pending = null;
       secrets.set(key + "-pending", "");
+      if (replaced && sameVaultApp(replaced.config, current.config)) {
+        saveReplaced([...replacedSessions(), replaced.session]);
+        void retireReplaced();
+      }
       await open();
       changed();
       return true;
@@ -7942,13 +7997,13 @@ var toneIcon = {
   error: "cloud-off",
   muted: "circle-pause"
 };
-var listPreview = (parent, paths, limit = 5) => {
+var listPreview = (parent, paths, limit2 = 5) => {
   const list = parent.createEl("ul", { cls: "basalt-sync-paths" });
-  for (const path3 of paths.slice(0, limit)) list.createEl("li", { text: path3 });
-  if (paths.length > limit)
+  for (const path3 of paths.slice(0, limit2)) list.createEl("li", { text: path3 });
+  if (paths.length > limit2)
     list.createEl("li", {
       cls: "basalt-sync-more",
-      text: `and ${(paths.length - limit).toLocaleString("en-US")} more`
+      text: `and ${(paths.length - limit2).toLocaleString("en-US")} more`
     });
 };
 function renderHowItWorks(parent) {
@@ -8166,6 +8221,19 @@ function watchRemoteChanges(input) {
   }, remoteWakeMs);
 }
 
+// clients/obsidian/device-name.ts
+var limit = 60;
+function desktopDeviceName(hostname) {
+  const name = hostname.split(".")[0].replace(/[-_]+/gu, " ").replace(/[^\p{L}\p{N} ']/gu, "").replace(/\s+/gu, " ").trim();
+  const capped = Array.from(name).slice(0, limit).join("").trim();
+  return capped.length === 0 || /^\d+$/u.test(capped) || capped.toLowerCase() === "localhost" ? void 0 : capped;
+}
+function mobileDeviceName(platform) {
+  if (platform.isIosApp) return platform.isTablet ? "iPad" : "iPhone";
+  if (platform.isAndroidApp) return platform.isTablet ? "Android tablet" : "Android phone";
+  return void 0;
+}
+
 // clients/obsidian/plugin/main.ts
 var idleCheckpointMs = 3 * 6e4;
 var ownWriteMs = 2e3;
@@ -8192,6 +8260,16 @@ var BasaltSyncPlugin = class extends import_obsidian8.Plugin {
   listeners = /* @__PURE__ */ new Set();
   statusBar = null;
   checkpointWhenIdle;
+  /** This device's name for Signalbox: the computer's name, or the kind of phone or tablet. */
+  deviceName() {
+    if (!import_obsidian8.Platform.isDesktopApp) return mobileDeviceName(import_obsidian8.Platform);
+    try {
+      const os = require("node:os");
+      return typeof os === "object" && os !== null && "hostname" in os && typeof os.hostname === "function" ? desktopDeviceName(String(os.hostname())) : void 0;
+    } catch {
+      return void 0;
+    }
+  }
   get vaultName() {
     return this.app.vault.getName();
   }
@@ -8236,6 +8314,7 @@ var BasaltSyncPlugin = class extends import_obsidian8.Plugin {
           },
           key: this.store.secretKey,
           changed: proxy.notify,
+          report: () => ({ device: this.deviceName(), vault: this.vaultName }),
           binary: async ({ appId, remote, signal, resolve }) => createBinaryClient({
             text: this.local,
             io: obsidianBinaryIo(this, this.local, this.store, appId, signal),
