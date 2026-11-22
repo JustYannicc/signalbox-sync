@@ -7272,6 +7272,16 @@ async function createController(input) {
   };
 }
 
+// .upstream/packages/mcp-auth/src/contracts/device-label.ts
+var deviceReportLimit = 80;
+var deviceReportLabel = (value) => {
+  if (value === void 0) return void 0;
+  const label = Array.from(
+    value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/gu, " ").trim()
+  ).slice(0, deviceReportLimit).join("").trim();
+  return label.length === 0 ? void 0 : label;
+};
+
 // clients/obsidian/link.ts
 var protocolAction = "signalbox-sync";
 var identity2 = /^[A-Za-z0-9_-]{1,128}$/u;
@@ -7295,6 +7305,7 @@ function parseConnectLink(params) {
     host: new URL(scoped).host
   };
 }
+var linkedToOtherVault = (linked, vault) => linked !== null && deviceReportLabel(linked) !== deviceReportLabel(vault);
 
 // clients/obsidian/plugin/obsidian-http.ts
 var import_obsidian2 = require("obsidian");
@@ -7734,7 +7745,7 @@ var ConnectModal = class extends import_obsidian4.Modal {
       cls: "basalt-sync-muted",
       text: host.mobile ? "Connect your Mac first so it imports the vault. This phone then joins the cloud copy and downloads attachments when you open a note." : "This Mac becomes the source: everything above uploads once, and the import resumes if interrupted. Phones join the cloud copy afterwards."
     });
-    if (request.vaultName && request.vaultName !== host.vaultName)
+    if (linkedToOtherVault(request.vaultName, host.vaultName))
       contentEl.createDiv({
         cls: "basalt-sync-callout is-warn",
         text: `This link was made for the vault \u201C${request.vaultName}\u201D. You're in \u201C${host.vaultName}\u201D. Only continue if this is the vault you want in Signalbox.`
